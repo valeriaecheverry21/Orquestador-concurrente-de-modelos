@@ -9,6 +9,7 @@ Cliente asíncrono en Python 3.12 que ofrece **una única interfaz** para OpenAI
 | `schemas.py` | Modelos Pydantic: `ChatMessage`, `ModelConfig` (temperatura 0–2, `max_tokens`, timeout, reintentos), `ModelResponse`, `StreamChunk`, `LLMError` |
 | `llm_clients.py` | `BaseLLMClient` (clase abstracta), `OpenAIClient`, `AnthropicClient` y `AsyncLLMManager` |
 | `main.py` | Script de validación: pregunta "¿Qué es la entropía?" en modo normal y en streaming |
+| `server.py` + `static/index.html` | Servidor web local (FastAPI) con una página para probar el cliente |
 | `tests/test_clients.py` | Pruebas sin red (API simulada): respuestas, streaming, rate limit, API key inválida, errores de red |
 | `.env.example` | Plantilla de variables de entorno |
 | `orquestador.py` | Ejercicio anterior (simulación de llamadas concurrentes con `asyncio`) |
@@ -59,6 +60,24 @@ python main.py --provider anthropic
 
 Para cada proveedor se hace la misma pregunta dos veces: primero en modo normal (respuesta completa, latencia y tokens) y después en streaming (el texto aparece a medida que llega). Si falta una clave o es inválida, se muestra un error controlado y el script sigue con el siguiente proveedor.
 
+## Interfaz web en localhost (opcional)
+
+```bash
+uvicorn server:app
+```
+
+Abre http://localhost:8000, elige el proveedor, escribe la pregunta y pulsa **Enviar (streaming)** o **Enviar (normal)**. Para detener el servidor, pulsa `Ctrl+C` en la terminal.
+
+Endpoints que expone `server.py` (documentación interactiva en http://localhost:8000/docs):
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/api/providers` | Proveedores disponibles y si tienen API key |
+| `POST` | `/api/chat` | Respuesta completa (`ModelResponse`) |
+| `POST` | `/api/chat/stream` | Streaming: una línea JSON (`StreamChunk`) por fragmento |
+
+Cuerpo de las peticiones POST: `{"provider": "openai" | "anthropic", "message": "..."}`.
+
 ## Pruebas sin API key
 
 ```bash
@@ -105,3 +124,62 @@ asyncio.run(demo())
 - Los modelos actuales de Claude **no aceptan `temperature`** (la API responde 400). El parámetro se valida igual en `ModelConfig` para mantener la interfaz común, pero solo se envía a OpenAI.
 - Los mensajes con rol `system` se envían en el parámetro `system`, que es como lo espera la API de Anthropic.
 - Está activado el *fallback* del servidor (`fallbacks="default"`): si el modelo rechaza una petición por sus filtros de seguridad, la API la reintenta automáticamente con otro modelo dentro de la misma llamada.
+
+---
+
+# Pre-entrega 2: Pipeline de extracción de entidades técnicas
+
+Recibe un párrafo de texto sin procesar (una descripción de arquitectura, un log de error...) y devuelve un objeto validado con Pydantic, usando LangChain (LCEL).
+
+| Archivo | Contenido |
+|---|---|
+| `schemas.py` | `EntidadesTecnicas` (contrato de salida) y el enum `NivelCriticidad` (`baja`, `media`, `alta`) |
+| `chain.py` | `ChatPromptTemplate`, cadena LCEL con `.with_structured_output()` y `.with_retry()`, y la función `process_text()` |
+| `test_pipeline.py` | Mini-script asíncrono de prueba (usa la API real) |
+| `tests/test_chain.py` | Pruebas sin red: esquema, recuperación tras un JSON mal formado y respuesta cortada |
+
+## La cadena
+
+```python
+chain = PROMPT | model.with_structured_output(EntidadesTecnicas, include_raw=True) | RunnableLambda(_validar)
+chain = chain.with_retry(retry_if_exception_type=ERRORES_REINTENTABLES, stop_after_attempt=3, wait_exponential_jitter=True)
+```
+
+- **Contrato (`EntidadesTecnicas`)**: `tecnologias` no puede estar vacía (se quitan duplicados y nombres en blanco), `nivel_de_criticidad` solo admite los tres valores del enum y `resumen_tecnico` tiene entre 10 y 400 caracteres. No se aceptan campos extra.
+- **Prompt modular**: `ChatPromptTemplate` con las variables `{texto}` y `{instrucciones_formato}`; no hay f-strings.
+- **`finish_reason`**: con `include_raw=True` la cadena recibe también el mensaje crudo del modelo. Si el `finish_reason` / `stop_reason` indica que la respuesta se cortó (`length`, `max_tokens`), el objeto se descarta aunque se haya podido parsear y se lanza `RespuestaIncompletaError`.
+- **Reintentos**: un JSON mal formado, una salida que no cumple el esquema o una respuesta cortada lanzan `SalidaInvalidaError`, y `.with_retry()` repite la llamada (3 intentos en total, con backoff exponencial). Los errores de red y de rate limit los reintenta el SDK (`LLM_MAX_RETRIES`).
+- **Modelo**: `build_model()` reutiliza `ModelConfig` y las variables de entorno del Módulo 1 (`LLM_PROVIDER`, `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `LLM_MAX_TOKENS`...) para crear un `ChatOpenAI` o un `ChatAnthropic`.
+- **Logs**: el logger `pipeline` registra cada respuesta recibida, su `finish_reason`, el resultado de la validación y cada intento fallido.
+
+## Cómo ejecutarlo
+
+```bash
+pip install -r requirements.txt
+python test_pipeline.py                              # usa el proveedor de LLM_PROVIDER
+python -m unittest tests.test_chain -v               # pruebas sin red, no gastan saldo
+```
+
+`test_pipeline.py` ejecuta tres casos: un texto claro, un texto ambiguo (prueba de estrés) y una llamada con `max_tokens=15` para forzar una respuesta cortada y ver los reintentos en los logs.
+
+Uso desde código:
+
+```python
+import asyncio
+from chain import process_text
+
+resultado = asyncio.run(process_text("La API en FastAPI agota el pool de conexiones de PostgreSQL..."))
+print(resultado.model_dump_json(indent=2))
+```
+
+## Ejemplo de salida
+
+Formato del objeto que devuelve `process_text()` (ejemplo ilustrativo):
+
+```json
+{
+  "tecnologias": ["FastAPI", "Redis", "PostgreSQL"],
+  "nivel_de_criticidad": "alta",
+  "resumen_tecnico": "API con caché en Redis y persistencia en PostgreSQL; cuello de botella en conexiones concurrentes."
+}
+```

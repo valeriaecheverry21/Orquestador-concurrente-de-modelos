@@ -109,3 +109,58 @@ class StreamChunk(BaseModel):
 
     text: str = ""
     error: LLMError | None = None
+
+
+# --- Pre-entrega 2: contrato de salida del pipeline de extracción (chain.py) ---
+
+
+class NivelCriticidad(StrEnum):
+    BAJA = "baja"
+    MEDIA = "media"
+    ALTA = "alta"
+
+
+class EntidadesTecnicas(BaseModel):
+    """Entidades técnicas extraídas de un texto (descripción de arquitectura, log de error, ...)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tecnologias: list[str] = Field(
+        min_length=1,
+        description=(
+            "Tecnologías, frameworks, lenguajes, bases de datos o servicios mencionados en el texto, "
+            "con su nombre propio (p. ej. 'FastAPI', 'Redis'). Sin duplicados. Nunca vacía."
+        ),
+    )
+    nivel_de_criticidad: NivelCriticidad = Field(
+        description=(
+            "Impacto del problema o riesgo descrito: 'baja' (informativo o cosmético), "
+            "'media' (degradación parcial) o 'alta' (caída, pérdida de datos o fallo de seguridad)."
+        ),
+    )
+    resumen_tecnico: str = Field(
+        min_length=10,
+        max_length=400,
+        description="Resumen técnico en español, de una o dos frases, del sistema y de su problema principal.",
+    )
+
+    @field_validator("tecnologias")
+    @classmethod
+    def _limpiar_tecnologias(cls, v: list[str]) -> list[str]:
+        """Quita espacios, vacíos y duplicados (sin distinguir mayúsculas), conservando el orden."""
+        vistas: dict[str, str] = {}
+        for nombre in v:
+            nombre = nombre.strip()
+            if nombre:
+                vistas.setdefault(nombre.casefold(), nombre)
+        if not vistas:
+            raise ValueError("debe incluir al menos una tecnología con nombre")
+        return list(vistas.values())
+
+    @field_validator("resumen_tecnico")
+    @classmethod
+    def _resumen_no_vacio(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 10:
+            raise ValueError("el resumen técnico es demasiado corto")
+        return v

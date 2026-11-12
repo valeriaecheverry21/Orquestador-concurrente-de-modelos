@@ -54,6 +54,9 @@ def map_sdk_error(exc: Exception, sdk: Any) -> LLMError:
             return LLMError(type=ErrorType.QUOTA, message=f"Cuota agotada: {msg}", status_code=status)
         return LLMError(type=ErrorType.RATE_LIMIT, message=msg, retryable=True, status_code=status)
     if isinstance(exc, sdk.BadRequestError):
+        # Anthropic responde 400 cuando la cuenta no tiene saldo.
+        if "credit balance" in msg.lower():
+            return LLMError(type=ErrorType.QUOTA, message=f"Saldo insuficiente: {msg}", status_code=status)
         return LLMError(type=ErrorType.BAD_REQUEST, message=msg, status_code=status)
     if isinstance(exc, sdk.APIStatusError):
         if status is not None and (status >= 500 or status in (408, 409)):
@@ -156,6 +159,11 @@ class BaseLLMClient(ABC):
         await self.aclose()
 
     # --- utilidades --------------------------------------------------------
+    @property
+    def is_configured(self) -> bool:
+        """True si hay API key para este proveedor."""
+        return self._sdk is not None
+
     def _missing_key_error(self) -> LLMError | None:
         if self._sdk is None:
             return LLMError(type=ErrorType.CONFIG, message=f"Falta la variable de entorno {self.api_key_env}")

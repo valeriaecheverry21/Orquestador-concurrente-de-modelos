@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Client</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #e2e1dc; --accent: #2f5bd3; --accent-text: #ffffff;
+    --error-bg: #fdecec; --error-text: #a12626; --ok: #2e7d4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9b9a94;
+      --border: #33332f; --accent: #6c8ef0; --accent-text: #0e0e0d;
+      --error-bg: #3a1c1c; --error-text: #f2a3a3; --ok: #6fcf97;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: .95rem; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 6px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
+  .row > div { flex: 1 1 200px; }
+  select, textarea {
+    width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button {
+    font: inherit; border-radius: 8px; padding: 8px 16px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text);
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status { font-size: .85rem; color: var(--muted); }
+  .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--muted); }
+  .status .dot.on { background: var(--ok); }
+  #output { margin-top: 20px; white-space: pre-wrap; min-height: 3em; }
+  #output:empty::before { content: "La respuesta aparecerá aquí."; color: var(--muted); }
+  .error { background: var(--error-bg); color: var(--error-text); border-radius: 8px; padding: 10px 12px; margin-top: 12px; }
+  #meta { margin-top: 10px; font-size: .85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Unified Async LLM Client</h1>
+  <p class="sub">Haz una pregunta a OpenAI o Claude y elige entre respuesta completa o streaming.</p>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label for="provider">Proveedor</label>
+        <select id="provider"></select>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+    <label for="message">Pregunta</label>
+    <textarea id="message">¿Qué es la entropía?</textarea>
+    <div class="buttons">
+      <button id="btn-stream">Enviar (streaming)</button>
+      <button id="btn-normal" class="secondary">Enviar (normal)</button>
+    </div>
+  </div>
+
+  <div id="output"></div>
+  <div id="error" class="error" hidden></div>
+  <div id="meta"></div>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const providerSel = $("provider"), output = $("output"), errorBox = $("error"), meta = $("meta");
+  let providers = [];
+
+  function showError(err) {
+    errorBox.hidden = false;
+    errorBox.textContent = typeof err === "string" ? err : `[${err.type}] ${err.message}`;
+  }
+
+  function updateStatus() {
+    const p = providers.find((x) => x.provider === providerSel.value);
+    if (!p) return;
+    $("status").innerHTML = p.configured
+      ? `<span class="dot on"></span>Modelo: ${p.model}`
+      : `<span class="dot"></span>Sin API key (${p.provider.toUpperCase()}_API_KEY en .env)`;
+  }
+
+  async function loadProviders() {
+    providers = await (await fetch("/api/providers")).json();
+    providerSel.innerHTML = providers
+      .map((p) => `<option value="${p.provider}">${p.provider === "openai" ? "OpenAI" : "Anthropic (Claude)"}</option>`)
+      .join("");
+    const firstReady = providers.find((p) => p.configured);
+    if (firstReady) providerSel.value = firstReady.provider;
+    updateStatus();
+  }
+
+  function setBusy(busy) {
+    $("btn-stream").disabled = busy;
+    $("btn-normal").disabled = busy;
+  }
+
+  function reset() {
+    output.textContent = "";
+    errorBox.hidden = true;
+    meta.textContent = "";
+  }
+
+  function body() {
+    return JSON.stringify({ provider: providerSel.value, message: $("message").value });
+  }
+
+  async function sendNormal() {
+    reset(); setBusy(true);
+    meta.textContent = "Esperando respuesta…";
+    try {
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: body() });
+      const data = await res.json();
+      if (!res.ok) { showError(data.detail ? JSON.stringify(data.detail) : `HTTP ${res.status}`); meta.textContent = ""; return; }
+      if (data.error) { showError(data.error); meta.textContent = ""; return; }
+      output.textContent = data.content;
+      const tokens = data.usage ? data.usage.input_tokens + data.usage.output_tokens : "?";
+      meta.textContent = `${data.model} · ${Math.round(data.latency_ms)} ms · ${tokens} tokens · intentos: ${data.attempts}`;
+    } catch (e) {
+      showError(`No se pudo conectar con el servidor: ${e}`); meta.textContent = "";
+    } finally { setBusy(false); }
+  }
+
+  async function sendStream() {
+    reset(); setBusy(true);
+    const start = performance.now();
+    let first = null;
+    try {
+      const res = await fetch("/api/chat/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: body() });
+      if (!res.ok) { const d = await res.json(); showError(d.detail ? JSON.stringify(d.detail) : `HTTP ${res.status}`); return; }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const chunk = JSON.parse(line);
+          if (chunk.error) { showError(chunk.error); continue; }
+          if (first === null) first = performance.now();
+          output.textContent += chunk.text;
+        }
+      }
+      if (first !== null) {
+        meta.textContent = `Primer fragmento: ${Math.round(first - start)} ms · total: ${Math.round(performance.now() - start)} ms`;
+      }
+    } catch (e) {
+      showError(`No se pudo conectar con el servidor: ${e}`);
+    } finally { setBusy(false); }
+  }
+
+  providerSel.addEventListener("change", updateStatus);
+  $("btn-stream").addEventListener("click", sendStream);
+  $("btn-normal").addEventListener("click", sendNormal);
+  $("message").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendStream();
+  });
+  loadProviders().catch((e) => showError(`No se pudo cargar la lista de proveedores: ${e}`));
+</script>
+</body>
+</html>

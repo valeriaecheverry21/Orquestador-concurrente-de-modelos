@@ -164,3 +164,40 @@ class EntidadesTecnicas(BaseModel):
         if len(v) < 10:
             raise ValueError("el resumen técnico es demasiado corto")
         return v
+
+
+# --- Pre-entrega 3: salida de la cadena RAG (rag_chain.py) ---
+
+NO_LO_SE = "No lo sé"
+
+
+class RespuestaGenerada(BaseModel):
+    """Lo que devuelve el LLM (lo valida el PydanticOutputParser)."""
+
+    respuesta: str = Field(
+        min_length=1,
+        description=f"Respuesta basada solo en el contexto. Si no está en el contexto, empieza con '{NO_LO_SE}'.",
+    )
+    encontrada: bool = Field(description="true solo si la respuesta está en el contexto")
+    referencias: list[str] = Field(
+        default_factory=list,
+        description="ids de los fragmentos usados, copiados del atributo id (p. ej. '02_despliegue_y_ci.md#1')",
+    )
+
+
+class Referencia(BaseModel):
+    """Fragmento del dataset que respalda la respuesta."""
+
+    id: str
+    fuente: str
+    similitud: float = Field(description="similitud coseno entre la pregunta y el fragmento (1 = idéntico)")
+    extracto: str
+
+
+class RespuestaRAG(BaseModel):
+    """Salida final de get_rag_response(): texto y referencias verificadas."""
+
+    pregunta: str
+    respuesta: str
+    encontrada: bool
+    referencias: list[Referencia] = Field(default_factory=list)

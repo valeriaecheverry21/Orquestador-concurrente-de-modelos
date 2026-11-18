@@ -7,3 +7,9 @@ uvicorn>=0.54
 langchain-core>=1.8
 langchain-openai>=1.7
 langchain-anthropic>=1.7
+# Pre-entrega 3: RAG local
+chromadb>=1.5
+langchain-chroma>=1.1
+langchain-text-splitters>=1.1
+langchain-huggingface>=1.2
+sentence-transformers>=6.3
